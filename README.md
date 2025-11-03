@@ -1,6 +1,6 @@
 # Mollusk-on-demand
 
-A Rust crate that simplifies testing Solana programs with [Mollusk](https://github.com/anza/mollusk) by automatically fetching mainnet accounts and programs on-demand.
+A Rust crate that simplifies testing Solana programs with [Mollusk](https://github.com/anza-xyz/mollusk) by automatically fetching mainnet accounts and programs on-demand.
 
 ## Why?
 
