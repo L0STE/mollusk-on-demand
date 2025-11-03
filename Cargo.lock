@@ -1511,10 +1511,7 @@ dependencies = [
 name = "mollusk-on-demand"
 version = "0.0.1"
 dependencies = [
- "base64 0.22.1",
  "mollusk-svm",
- "serde",
- "serde_json",
  "solana-account",
  "solana-commitment-config",
  "solana-instruction",
