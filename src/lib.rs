@@ -118,6 +118,10 @@ use {
     thiserror::Error,
 };
 
+/// Maximum number of accounts to fetch in a single getMultipleAccounts call.
+/// https://github.com/anza-xyz/agave/blob/master/rpc-client-types/src/request.rs#L148
+const MAX_MULTIPLE_ACCOUNTS: usize = 100;
+
 /// Validates that the given data contains a valid ELF header.
 ///
 /// This performs basic validation to ensure the data is likely a valid ELF binary.
@@ -213,10 +217,7 @@ impl RpcAccountStore {
     /// By default:
     /// - Missing accounts will cause an error (use `allow_missing_accounts()` to change)
     /// - Program validation is enabled (use `skip_program_validation()` to disable)
-    pub fn new_with_commitment(
-        rpc_url: impl Into<String>,
-        commitment: CommitmentConfig,
-    ) -> Self {
+    pub fn new_with_commitment(rpc_url: impl Into<String>, commitment: CommitmentConfig) -> Self {
         Self {
             client: RpcClient::new_with_commitment(rpc_url.into(), commitment),
             cache: HashMap::new(),
@@ -247,10 +248,7 @@ impl RpcAccountStore {
     ///
     /// Extracts all account pubkeys from the instruction's account metas
     /// and fetches them from the RPC endpoint using getMultipleAccounts.
-    pub async fn from_instruction(
-        mut self,
-        instruction: &Instruction,
-    ) -> Result<Self, RpcError> {
+    pub async fn from_instruction(mut self, instruction: &Instruction) -> Result<Self, RpcError> {
         let pubkeys: Vec<_> = instruction.accounts.iter().map(|m| m.pubkey).collect();
         self.fetch_accounts(&pubkeys).await?;
         Ok(self)
@@ -298,21 +296,26 @@ impl RpcAccountStore {
             return Ok(());
         }
 
-        let accounts = self.client.get_multiple_accounts(&missing_pubkeys).await?;
+        for missing_pubkeys_chunk in missing_pubkeys.chunks(MAX_MULTIPLE_ACCOUNTS) {
+            let accounts = self
+                .client
+                .get_multiple_accounts(missing_pubkeys_chunk)
+                .await?;
 
-        // Store fetched accounts in cache
-        for (pubkey, account_opt) in missing_pubkeys.iter().zip(accounts) {
-            match account_opt {
-                Some(account) => {
-                    self.cache.insert(*pubkey, account);
-                }
-                None => {
-                    if self.allow_missing_accounts {
-                        // Create a default (empty) account for missing accounts
-                        self.cache.insert(*pubkey, Account::default());
-                    } else {
-                        // Return an error if the account doesn't exist
-                        return Err(RpcError::AccountNotFound(*pubkey));
+            // Store fetched accounts in cache
+            for (pubkey, account_opt) in missing_pubkeys.iter().zip(accounts) {
+                match account_opt {
+                    Some(account) => {
+                        self.cache.insert(*pubkey, account);
+                    }
+                    None => {
+                        if self.allow_missing_accounts {
+                            // Create a default (empty) account for missing accounts
+                            self.cache.insert(*pubkey, Account::default());
+                        } else {
+                            // Return an error if the account doesn't exist
+                            return Err(RpcError::AccountNotFound(*pubkey));
+                        }
                     }
                 }
             }
@@ -381,11 +384,7 @@ impl RpcAccountStore {
                         })?;
                     }
 
-                    mollusk.add_program_with_elf_and_loader(
-                        pubkey,
-                        &account.data,
-                        &account.owner,
-                    );
+                    mollusk.add_program_with_elf_and_loader(pubkey, &account.data, &account.owner);
                 }
                 // For BPF Loader v3
                 else if account.owner == mollusk_svm::program::loader_keys::LOADER_V3 {
@@ -399,19 +398,24 @@ impl RpcAccountStore {
                         });
                     }
 
-                    let program_data_pubkey = Pubkey::try_from(&account.data[4..36]).map_err(|e| {
-                        RpcError::MalformedProgram {
-                            program: *pubkey,
-                            reason: format!("Invalid program data pubkey: {}", e),
-                        }
-                    })?;
+                    let program_data_pubkey =
+                        Pubkey::try_from(&account.data[4..36]).map_err(|e| {
+                            RpcError::MalformedProgram {
+                                program: *pubkey,
+                                reason: format!("Invalid program data pubkey: {}", e),
+                            }
+                        })?;
 
-                    let program_data_account = self.cache.get(&program_data_pubkey).ok_or_else(|| {
-                        RpcError::InvalidProgramData {
-                            program: *pubkey,
-                            reason: format!("Program data account not found: {}", program_data_pubkey),
-                        }
-                    })?;
+                    let program_data_account =
+                        self.cache.get(&program_data_pubkey).ok_or_else(|| {
+                            RpcError::InvalidProgramData {
+                                program: *pubkey,
+                                reason: format!(
+                                    "Program data account not found: {}",
+                                    program_data_pubkey
+                                ),
+                            }
+                        })?;
 
                     // The ELF starts at offset 45 in the program data account
                     // (first 45 bytes are the ProgramData header)
@@ -428,26 +432,19 @@ impl RpcAccountStore {
                     let elf_data = &program_data_account.data[45..];
 
                     if self.validate_programs {
-                        validate_elf(elf_data).map_err(|reason| {
-                            RpcError::InvalidProgramData {
-                                program: *pubkey,
-                                reason,
-                            }
+                        validate_elf(elf_data).map_err(|reason| RpcError::InvalidProgramData {
+                            program: *pubkey,
+                            reason,
                         })?;
                     }
 
-                    mollusk.add_program_with_elf_and_loader(
-                        pubkey,
-                        elf_data,
-                        &account.owner,
-                    );
+                    mollusk.add_program_with_elf_and_loader(pubkey, elf_data, &account.owner);
                 }
             }
         }
 
         Ok(self)
     }
-
 
     /// Sync the Mollusk environment to the current mainnet slot.
     ///
